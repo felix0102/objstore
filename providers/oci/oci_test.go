@@ -1,17 +1,20 @@
 package oci
 
 import (
+	"context"
+	"net/http"
 	"testing"
+	"time"
 
 	"github.com/efficientgo/core/testutil"
 	"github.com/go-kit/log"
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 	"github.com/oracle/oci-go-sdk/v65/objectstorage/transfer"
+	"github.com/pkg/errors"
 	"github.com/thanos-io/objstore"
 	"github.com/thanos-io/objstore/errutil"
 	"gopkg.in/yaml.v2"
-	"time"
 )
 
 func TestNewBucketWithErrorRoundTripper(t *testing.T) {
@@ -164,4 +167,57 @@ func TestAttributesFromHeadObjectResponseWithoutETag(t *testing.T) {
 
 	testutil.Equals(t, int64(10), attrs.Size)
 	testutil.Assert(t, attrs.Version == nil)
+}
+
+type fakeServiceError struct {
+	statusCode int
+}
+
+func (e fakeServiceError) Error() string           { return "fake OCI service error" }
+func (e fakeServiceError) GetHTTPStatusCode() int  { return e.statusCode }
+func (e fakeServiceError) GetMessage() string      { return "fake" }
+func (e fakeServiceError) GetCode() string         { return "Fake" }
+func (e fakeServiceError) GetOpcRequestID() string { return "" }
+
+func TestIsConditionNotMetErr(t *testing.T) {
+	b := &Bucket{}
+
+	testutil.Assert(t,
+		b.IsConditionNotMetErr(fakeServiceError{statusCode: http.StatusPreconditionFailed}),
+		"expected HTTP 412 to be classified as a condition failure",
+	)
+	testutil.Assert(t,
+		!b.IsConditionNotMetErr(fakeServiceError{statusCode: http.StatusNotFound}),
+		"expected HTTP 404 not to be classified as a condition failure",
+	)
+	testutil.Assert(t,
+		b.IsConditionNotMetErr(errConditionInvalid),
+		"expected an unsupported condition type to be classified as a condition failure",
+	)
+	testutil.Assert(t,
+		!b.IsConditionNotMetErr(errors.New("unrelated error")),
+		"expected an unrelated error not to be classified as a condition failure",
+	)
+}
+
+var errConditionalReader = errors.New("reader failed")
+
+type failingReader struct{}
+
+func (failingReader) Read(_ []byte) (int, error) {
+	return 0, errConditionalReader
+}
+
+func TestUploadConditionallyReaderError(t *testing.T) {
+	b := &Bucket{}
+
+	err := b.uploadConditionally(
+		context.Background(),
+		failingReader{},
+		transfer.UploadRequest{},
+	)
+
+	testutil.NotOk(t, err)
+	testutil.Assert(t, errors.Is(err, errConditionalReader),
+		"expected the reader error to be preserved, got: %v", err)
 }
