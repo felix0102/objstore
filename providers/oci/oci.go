@@ -4,7 +4,6 @@
 package oci
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -207,9 +206,9 @@ func (b *Bucket) Upload(ctx context.Context, name string, r io.Reader, opts ...o
 	uploadOptions := objstore.ApplyObjectUploadOptions(opts...)
 
 	uploadRequest := transfer.UploadRequest{
-		NamespaceName: common.String(b.namespace),
-		BucketName:    common.String(b.name),
-		ObjectName:    common.String(name),
+		NamespaceName: &b.namespace,
+		BucketName:    &b.name,
+		ObjectName:    &name,
 
 		EnableMultipartChecksumVerification: common.Bool(true),
 		ObjectStorageClient:                 b.client,
@@ -224,7 +223,7 @@ func (b *Bucket) Upload(ctx context.Context, name string, r io.Reader, opts ...o
 	}
 
 	if uploadOptions.ContentType != "" {
-		uploadRequest.ContentType = common.String(uploadOptions.ContentType)
+		uploadRequest.ContentType = &uploadOptions.ContentType
 	}
 
 	if uploadRequest.IfMatch != nil || uploadRequest.IfNoneMatch != nil {
@@ -250,23 +249,33 @@ func (b *Bucket) uploadConditionally(
 	r io.Reader,
 	uploadRequest transfer.UploadRequest,
 ) error {
-	data, err := io.ReadAll(r)
+	tmp, err := os.CreateTemp("", "thanos-oci-conditional-upload-*")
 	if err != nil {
-		return errors.Wrap(err, "read object data for conditional OCI upload")
+		return errors.Wrap(err, "create temporary file for conditional OCI upload")
+	}
+	defer func() { _ = tmp.Close() }()
+	defer func() { _ = os.Remove(tmp.Name()) }()
+
+	size, err := io.Copy(tmp, r)
+	if err != nil {
+		return errors.Wrap(err, "write object data for conditional OCI upload")
+	}
+
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return errors.Wrap(err, "rewind temporary file for conditional OCI upload")
 	}
 
 	request := objectstorage.PutObjectRequest{
 		NamespaceName:   uploadRequest.NamespaceName,
 		BucketName:      uploadRequest.BucketName,
 		ObjectName:      uploadRequest.ObjectName,
-		ContentLength:   common.Int64(int64(len(data))),
-		PutObjectBody:   io.NopCloser(bytes.NewReader(data)),
+		ContentLength:   &size,
+		PutObjectBody:   io.NopCloser(tmp),
 		IfMatch:         uploadRequest.IfMatch,
 		IfNoneMatch:     uploadRequest.IfNoneMatch,
 		ContentType:     uploadRequest.ContentType,
 		RequestMetadata: uploadRequest.RequestMetadata,
 	}
-
 	_, err = b.client.PutObject(ctx, request)
 	return err
 }
@@ -341,15 +350,17 @@ func (b *Bucket) IsConditionNotMetErr(err error) bool {
 
 // ObjectSize returns the size of the specified object.
 func (b *Bucket) ObjectSize(ctx context.Context, name string) (uint64, error) {
+
 	response, err := headObject(ctx, *b, name)
 	if err != nil {
 		return 0, err
 	}
-
 	if response.ContentLength == nil {
-		return 0, errors.Errorf("OCI object %q response has no content length", name)
+		panic(fmt.Sprintf(
+			"OCI object %q response has no content length",
+			name,
+		))
 	}
-
 	return uint64(*response.ContentLength), nil
 }
 
@@ -518,7 +529,7 @@ func applyUploadConditions(
 			return errConditionInvalid
 		}
 
-		req.IfMatch = common.String(uploadOptions.Condition.Value)
+		req.IfMatch = &uploadOptions.Condition.Value
 		return nil
 	}
 

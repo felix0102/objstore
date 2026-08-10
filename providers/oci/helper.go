@@ -281,9 +281,9 @@ func headObject(ctx context.Context, bkt Bucket, objectName string) (objectstora
 	}
 
 	return bkt.client.HeadObject(ctx, objectstorage.HeadObjectRequest{
-		NamespaceName:   common.String(bkt.namespace),
-		BucketName:      common.String(bkt.name),
-		ObjectName:      common.String(objectName),
+		NamespaceName:   &bkt.namespace,
+		BucketName:      &bkt.name,
+		ObjectName:      &objectName,
 		RequestMetadata: bkt.requestMetadata,
 	})
 }
